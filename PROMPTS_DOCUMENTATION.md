@@ -295,3 +295,217 @@ function getSystemPrompt(config: SystemPromptConfig): SystemModelMessage {
 ```
 
 ---
+
+## User Message Construction
+
+These prompts are responsible for building user messages with rich contextual information from the browser environment.
+
+### User Message Prompt Builder
+
+**Purpose:** Converts UI messages into model messages and enriches them with browser metadata and selected DOM elements context.
+
+**Location:** `agent/prompts/src/promts-xml/user.ts`
+
+**Key Features:**
+- Converts UI message parts to model message format
+- Appends browser metadata context when available
+- Appends selected DOM elements context when available
+- Handles multimodal content (text and files)
+
+**Implementation:**
+
+```typescript
+export function getUserMessagePrompt(
+  config: UserMessagePromptConfig,
+): UserModelMessage {
+  // convert file parts and text to model messages (without metadata) to ensure correct mapping of ui parts to model content
+  const convertedMessage = convertToModelMessages([config.userMessage]);
+
+  const content: UserModelMessage['content'] = [];
+
+  // exactly 1 message is the expected case, the latter is for unexpected conversion behavior of the ai library
+  if (convertedMessage.length === 1) {
+    const message = convertedMessage[0]! as UserModelMessage;
+    if (typeof message.content === 'string') {
+      content.push({
+        type: 'text',
+        text: message.content,
+      });
+    } else {
+      for (const part of message.content) content.push(part);
+    }
+  } else {
+    // add content of all messages to the content array and pass it to user message
+    for (const message of convertedMessage) {
+      for (const c of (message as UserModelMessage).content) {
+        if (typeof c === 'string')
+          content.push({
+            type: 'text',
+            text: c,
+          });
+        else content.push(c);
+      }
+    }
+  }
+
+  const metadataSnippet = config.userMessage.metadata?.browserData
+    ? browserMetadataToContextSnippet(config.userMessage.metadata?.browserData)
+    : null;
+  const selectedElementsSnippet =
+    (config.userMessage.metadata?.browserData?.selectedElements?.length || 0) >
+    0
+      ? htmlElementToContextSnippet(
+          config.userMessage.metadata?.browserData?.selectedElements ?? [],
+        )
+      : undefined;
+
+  if (metadataSnippet) {
+    content.push({
+      type: 'text',
+      text: metadataSnippet,
+    });
+  }
+
+  if (selectedElementsSnippet) {
+    content.push({
+      type: 'text',
+      text: selectedElementsSnippet,
+    });
+  }
+
+  return {
+    role: 'user',
+    content,
+  };
+}
+```
+
+### Browser Metadata Context
+
+**Purpose:** Formats browser metadata (URL, viewport, device info) into XML-structured context snippets for the LLM.
+
+**Location:** `agent/prompts/src/promts-xml/browser-metadata.ts`
+
+**Context Provided:**
+- Current URL
+- Page title
+- Zoom level
+- Viewport resolution
+- Device pixel ratio
+- User agent
+- Locale
+
+**Prompt Format:**
+
+```typescript
+export function browserMetadataToContextSnippet(
+  browserData: UserMessageMetadata['browserData'] | undefined,
+): string | null {
+  if (!browserData) return null;
+  return `
+  <browser-metadata>
+    <description>
+      This is the metadata of the browser that the user is using.
+    </description>
+    <content>
+      <current-url>
+        ${escapeXml(browserData.currentUrl)}
+      </current-url>
+
+      <current-title>
+        ${escapeXml(browserData.currentTitle)}
+      </current-title>
+
+      <current-zoom-level>
+        ${browserData.currentZoomLevel}
+      </current-zoom-level>
+
+      <viewport-resolution>
+        ${browserData.viewportResolution.width}x${browserData.viewportResolution.height}
+      </viewport-resolution>
+
+      <device-pixel-ratio>
+        ${browserData.devicePixelRatio}
+      </device-pixel-ratio>
+
+      <user-agent>
+        ${escapeXml(browserData.userAgent)}
+      </user-agent>
+
+      <locale>
+        ${escapeXml(browserData.locale)}
+      </locale>
+    </content>
+  </browser-metadata>
+  `;
+}
+```
+
+### HTML Elements Context
+
+**Purpose:** Converts selected DOM elements into LLM-readable context with element type, selector, xpath, attributes, and computed styles.
+
+**Location:** `agent/prompts/src/promts-xml/html-elements.ts`
+
+**Context Provided:**
+- Element type (tag name)
+- CSS selector (ID or class-based)
+- XPath (for element identification)
+- All element attributes
+- Text content (truncated if too long)
+
+**Prompt Format:**
+
+```typescript
+export function htmlElementToContextSnippet(
+  elements: SelectedElement[],
+): string {
+  const result = `
+  <dom-elements>
+    <description> These are the elements that the user has selected before making the request: </description>
+    <content>
+      ${elements.map((element) => htmlElementsToContextSnippet(element)).join('\n\n')}
+    </content>
+  </dom-elements>`;
+  return result;
+}
+
+export function htmlElementsToContextSnippet(
+  element: SelectedElement,
+  maxCharacterAmount = 10000,
+): string {
+  // Element type from nodeType
+  elementType = element.nodeType.toLowerCase();
+
+  // Construct selector from attributes
+  if (element.attributes.id) {
+    selector = `#${element.attributes.id}`;
+  } else if (element.attributes.class) {
+    selector = `.${element.attributes.class.split(' ').join('.')}`;
+  }
+
+  // Build XML-like element representation
+  let openingTag = '<html-element';
+
+  if (elementType) {
+    openingTag += ` type="${elementType}"`;
+  }
+
+  if (selector) {
+    openingTag += ` selector="${selector}"`;
+  }
+
+  // Add xpath information
+  openingTag += ` xpath="${element.xpath}"`;
+  openingTag += '>';
+
+  let result = `${openingTag}\n${cleanedHtml}\n</html-element>`;
+
+  // Apply character limit with truncation if needed
+  // ... truncation logic ...
+
+  return result;
+}
+```
+
+---
