@@ -509,3 +509,292 @@ export function htmlElementsToContextSnippet(
 ```
 
 ---
+
+## Chat Management
+
+### Chat Title Generation Prompt
+
+**Purpose:** Automatically generates concise, descriptive titles for new chat conversations based on the user's first message.
+
+**Location:** `agent/client/src/utils/generate-chat-title.ts`
+
+**Model Used:** Same model as the main agent (Claude Sonnet 4)
+
+**Configuration:**
+- Maximum title length: 7 words
+- Validation: 1-50 characters
+- Fallback: "New Chat - {timestamp}" if generation fails
+
+**Prompt:**
+
+```typescript
+export const generateChatTitleSystemPrompt = `
+<system_prompt>
+  <task>
+    You are a helpful assistant that creates short, concise titles for newly created chats between a user and a frontend coding agent.
+  </task>
+  <instructions>
+    <instruction>Analyze the first message of the user in the chat to understand its core intent.</instruction>
+    <instruction>Generate a chat title that summarizes this intent.</instruction>
+  </instructions>
+  <rules>
+    <rule name="length">The title must be a maximum of 7 words.</rule>
+    <rule name="format">Your response must consist ONLY of the generated title. Do not add any other text, explanation, or quotation marks.
+    </rule>
+  </rules>
+  <example>
+    <user_message>
+      Add a new text input field for a user's middle name in the main registration form, right after the first name field.
+    </user_message>
+    <valid_output>
+      Add Middle Name Field
+    </valid_output>
+  </example>
+</system_prompt>
+`;
+```
+
+---
+
+## Context Snippet Providers
+
+Context snippets provide dynamic project information that gets injected into the system prompt's `<additional_context>` section.
+
+### Project Information Snippet
+
+**Purpose:** Gathers comprehensive project structure and framework information to help the agent understand the codebase.
+
+**Location:** `agent/prompt-snippets/src/prompt-snippets/get-project-info.ts`
+
+**Information Collected:**
+- Project root path
+- Monorepo detection (pnpm, yarn, npm workspaces, Turborepo, Nx, Lerna, Rush)
+- Package manager (name and version)
+- List of all packages/workspaces with:
+  - Package name and version
+  - Package path
+  - Meta-frameworks detected (Next.js, Nuxt, SvelteKit, Remix, Astro, etc.)
+  - Frontend frameworks (React, Vue, Svelte, Angular, Solid, Preact, etc.)
+  - Backend frameworks (Express, Fastify, Koa, NestJS, etc.)
+  - Build tools (Vite, Webpack, Rollup, esbuild, Parcel, etc.)
+  - Testing frameworks (Jest, Vitest, Mocha, Jasmine, etc.)
+
+**Snippet Format:**
+
+```typescript
+return {
+  type: 'project-info',
+  description: 'Complete Project Information and Structure',
+  content: `
+PROJECT ROOT:
+/path/to/project
+
+PACKAGE MANAGER: pnpm
+Version: 8.15.0
+
+PROJECT TYPE: Monorepo
+
+MONOREPO TOOLS:
+- pnpm (pnpm-workspace.yaml)
+
+WORKSPACES (3 total):
+
+- @myapp/web
+  Version: 1.0.0
+  Path: apps/web
+  Meta-frameworks: Next.js@14.0.0
+  Frontend: React@18.2.0
+  Build tools: Turbopack@1.0.0
+
+- @myapp/api
+  Version: 1.0.0
+  Path: apps/api
+  Backend: Express@4.18.0
+  Testing: Jest@29.0.0
+
+- @myapp/shared
+  Version: 1.0.0
+  Path: packages/shared
+  Frontend: React@18.2.0
+  Testing: Vitest@1.0.0
+  `,
+};
+```
+
+### Project Path Snippet
+
+**Purpose:** Provides the current working directory of the project.
+
+**Location:** `agent/prompt-snippets/src/prompt-snippets/get-project-path.ts`
+
+**Snippet Format:**
+
+```typescript
+return {
+  type: 'project-path',
+  description: 'Current Working Directory',
+  content: process.cwd(),
+};
+```
+
+---
+
+## Tool Descriptions
+
+These descriptions are provided to the LLM to enable tool use. Each tool has a description that explains its purpose and capabilities.
+
+### Read File Tool
+
+**Purpose:** Read file contents with line-by-line control for efficient file exploration.
+
+**Location:** `agent/tools/src/read-file-tool.ts`
+
+**Description:**
+
+```typescript
+export const DESCRIPTION = 'Read the contents of a file with line-by-line control';
+```
+
+**Parameters:**
+- `target_file`: Relative path of the file to read
+- `should_read_entire_file`: Whether to read the entire file
+- `start_line_one_indexed`: Starting line number (1-indexed)
+- `end_line_one_indexed_inclusive`: Ending line number (1-indexed, inclusive)
+- `explanation`: One sentence explanation of why this tool is being used
+
+### Overwrite File Tool
+
+**Purpose:** Overwrite entire file content or create new files with automatic directory creation.
+
+**Location:** `agent/tools/src/overwrite-file-tool.ts`
+
+**Description:**
+
+```typescript
+export const DESCRIPTION =
+  'Overwrite the entire content of a file. Creates the file if it does not exist, along with any necessary directories.';
+```
+
+**Parameters:**
+- `path`: Relative file path
+- `content`: New file content
+
+**Features:**
+- Automatically strips markdown code block markers
+- Creates parent directories as needed
+- Provides undo capability
+- Generates diff for UI display
+
+### List Files Tool
+
+**Purpose:** List files and directories with filtering and recursive options.
+
+**Location:** `agent/tools/src/list-files-tool.ts`
+
+**Description:**
+
+```typescript
+export const DESCRIPTION =
+  'List files and directories in a path (defaults to current directory). Use "recursive" to include subdirectories, "pattern" to filter by file extension or glob pattern, and "maxDepth" to limit recursion depth.';
+```
+
+**Parameters:**
+- `path`: Directory path (optional, defaults to current directory)
+- `recursive`: Whether to list files recursively (optional)
+- `maxDepth`: Maximum recursion depth (optional)
+- `pattern`: File extension or glob pattern (optional)
+- `includeDirectories`: Whether to include directories (optional, default: true)
+- `includeFiles`: Whether to include files (optional, default: true)
+
+### Grep Search Tool
+
+**Purpose:** Fast regex searches across files using ripgrep.
+
+**Location:** `agent/tools/src/grep-search-tool.ts`
+
+**Description:**
+
+```typescript
+export const DESCRIPTION = 'Fast, exact regex searches over text files using ripgrep';
+```
+
+**Parameters:**
+- `query`: The regex pattern to search for
+- `case_sensitive`: Whether the search should be case sensitive (optional)
+- `include_file_pattern`: Glob pattern for files to include (optional)
+- `exclude_file_pattern`: Glob pattern for files to exclude (optional)
+- `max_matches`: Maximum number of matches to return (default: 100)
+- `explanation`: One sentence explanation of why this tool is being used
+
+**Features:**
+- Respects .gitignore by default
+- Returns matches with file paths, line numbers, and previews
+- Supports result truncation
+
+### Glob Tool
+
+**Purpose:** Find files and directories matching glob patterns.
+
+**Location:** `agent/tools/src/glob-tool.ts`
+
+**Description:**
+
+```typescript
+export const DESCRIPTION = 'Find files and directories matching a glob pattern';
+```
+
+**Parameters:**
+- `pattern`: Glob pattern (e.g., "**/*.js")
+- `path`: Relative directory path to search in (optional)
+
+**Features:**
+- Supports standard glob syntax (*, **, ?, [abc])
+- Respects .gitignore by default
+- Returns relative paths
+
+### Multi-Edit Tool
+
+**Purpose:** Make multiple find-and-replace edits to a single file in one operation.
+
+**Location:** `agent/tools/src/multi-edit-tool.ts`
+
+**Description:**
+
+```typescript
+export const DESCRIPTION = 'Make multiple edits to a single file in one operation';
+```
+
+**Parameters:**
+- `file_path`: Relative file path
+- `edits`: Array of edit objects, each containing:
+  - `old_string`: The text to replace
+  - `new_string`: The text to replace it with
+  - `replace_all`: Replace all occurrences (optional, default: false)
+
+**Features:**
+- Edits are applied sequentially
+- More efficient than multiple single-edit operations
+- Provides undo capability
+- Generates diff for UI display
+
+### Delete File Tool
+
+**Purpose:** Delete a file from the file system with undo capability.
+
+**Location:** `agent/tools/src/delete-file-tool.ts`
+
+**Description:**
+
+```typescript
+export const DESCRIPTION = 'Delete a file from the file system';
+```
+
+**Parameters:**
+- `path`: Relative file path to delete
+
+**Features:**
+- Returns error if file doesn't exist
+- Provides undo capability (restores deleted file)
+- Generates diff for UI display
+
+---
