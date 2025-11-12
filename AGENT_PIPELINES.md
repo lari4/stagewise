@@ -522,3 +522,223 @@ Each tool execution:
 - `output-error`: Tool execution failed
 
 ---
+## 4. Message Conversion Pipeline
+
+**Purpose:** Convert UI messages (Karton format) to Model messages (Claude API format) with proper context enrichment and sanitization.
+
+**Entry Point:** `callAgent()` → `uiMessagesToModelMessages()`
+
+**Location:** `agent/client/src/utils/ui-messages-to-model-messages.ts`
+
+### ASCII Flow Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              UI Messages (Karton Format)                         │
+│  Input: ChatMessage[]                                            │
+│    [                                                             │
+│      { role: 'user', content: [...], metadata: {...} },          │
+│      { role: 'assistant', content: [...], toolCalls: [...] },    │
+│      ...                                                         │
+│    ]                                                             │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│          For Each Message: Route by Role                         │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+              ┌──────────┴──────────┐
+              │   Message Role?     │
+              └──────────┬──────────┘
+                         │
+      ┌──────────────────┼──────────────────┐
+      │                  │                  │
+     USER            ASSISTANT           OTHER
+      │                  │                  │
+      ▼                  ▼                  ▼
+┌──────────┐    ┌──────────────┐    ┌──────────┐
+│ USER     │    │ ASSISTANT    │    │ OTHER    │
+│ PIPELINE │    │ PIPELINE     │    │ PIPELINE │
+└────┬─────┘    └─────┬────────┘    └────┬─────┘
+     │                │                  │
+     │                │                  │
+     ▼                ▼                  ▼
+```
+
+### User Message Pipeline
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              User Message Processing                             │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│    Call: prompts.getUserMessagePrompt(config)                    │
+│    Input: UserMessagePromptConfig                                │
+│      { userMessage: ChatMessage }                                │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│    Step 1: Convert UI Parts to Model Content                     │
+│    - Text parts → { type: 'text', text: '...' }                  │
+│    - File parts → { type: 'document', ... }                      │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│    Step 2: Enrich with Browser Metadata (if available)           │
+│    Call: browserMetadataToContextSnippet()                       │
+│    Prompt Used: browser-metadata.ts                              │
+│    Output:                                                       │
+│      <browser-metadata>                                          │
+│        <current-url>...</current-url>                            │
+│        <viewport-resolution>...</viewport-resolution>            │
+│        <user-agent>...</user-agent>                              │
+│        <locale>...</locale>                                      │
+│        ...                                                       │
+│      </browser-metadata>                                         │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│    Step 3: Enrich with Selected Elements (if available)          │
+│    Call: htmlElementToContextSnippet()                           │
+│    Prompt Used: html-elements.ts                                 │
+│    Output:                                                       │
+│      <dom-elements>                                              │
+│        <html-element type="div" selector=".class" xpath="...">   │
+│          <!-- Element HTML structure -->                         │
+│        </html-element>                                           │
+│      </dom-elements>                                             │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│    Step 4: Build Final User Message                              │
+│    UserModelMessage {                                            │
+│      role: 'user',                                               │
+│      content: [                                                  │
+│        { type: 'text', text: userMessage },                      │
+│        { type: 'text', text: browserMetadataXml },               │
+│        { type: 'text', text: selectedElementsXml }               │
+│      ]                                                           │
+│    }                                                             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Assistant Message Pipeline
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Assistant Message Processing                        │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│    Check: Does message contain only reasoning parts?             │
+│    - Look for 'reasoning', 'step-start' content                  │
+│    - No text or tool calls                                       │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+                  ┌──────┴──────┐
+                  │ Only        │
+                  │ Reasoning?  │
+                  └──────┬──────┘
+                         │
+           ┌─────────────┴─────────────┐
+           │                           │
+          YES                          NO
+           │                           │
+           ▼                           ▼
+    ┌──────────┐              ┌────────────────┐
+    │   SKIP   │              │  PROCESS       │
+    │ Message  │              │  Message       │
+    └──────────┘              └────────┬───────┘
+                                       │
+                                       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│    Clone Message & Clean Tool Outputs                            │
+│    For each tool call result:                                    │
+│      - Remove 'diff' field (saves tokens)                        │
+│      - Remove 'undoExecute' callback (not serializable)          │
+│                                                                  │
+│    Why? Binary diff data wastes tokens and isn't needed by LLM   │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│    Convert to Model Format                                       │
+│    Call: convertToModelMessages([cleanedMessage])                │
+│    Output: AssistantModelMessage                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Data Enrichment Details
+
+**Browser Metadata Context:**
+- Current URL and page title
+- Zoom level
+- Viewport resolution (width x height)
+- Device pixel ratio
+- User agent string
+- Locale
+
+**DOM Elements Context:**
+- Element type (tag name)
+- CSS selector (ID or class-based)
+- XPath (for element identification)
+- All element attributes
+- Text content (truncated if > 10,000 chars)
+
+**Tool Output Sanitization:**
+- Removes: `diff` field (binary/large data)
+- Removes: `undoExecute` callback (not serializable)
+- Keeps: Success status, message, core result data
+- Purpose: Save tokens and prevent API errors
+
+### Prompts Used in Conversion
+
+1. **System Prompt:** `getSystemPrompt()` from `agent/prompts/src/promts-xml/system.ts`
+   - Injected once at the start of each agent call
+   - Contains core agent instructions + dynamic project context
+
+2. **User Message Prompt:** `getUserMessagePrompt()` from `agent/prompts/src/promts-xml/user.ts`
+   - Called for each user message
+   - Enriches with browser and DOM context
+
+3. **Browser Metadata:** `browserMetadataToContextSnippet()` from `agent/prompts/src/promts-xml/browser-metadata.ts`
+   - Appended to user messages when metadata available
+
+4. **DOM Elements:** `htmlElementToContextSnippet()` from `agent/prompts/src/promts-xml/html-elements.ts`
+   - Appended to user messages when elements selected
+
+### Data Flow Summary
+
+```
+Karton UI Messages
+  │
+  ├─> User Messages
+  │     └─> + Browser metadata
+  │     └─> + Selected elements
+  │     └─> UserModelMessage
+  │
+  ├─> Assistant Messages
+  │     └─> Filter reasoning-only
+  │     └─> Clean tool outputs
+  │     └─> AssistantModelMessage
+  │
+  └─> Other Messages
+        └─> Direct conversion
+        └─> ModelMessage
+
+All Messages Combined
+  │
+  └─> Sent to Claude API
+```
+
+---
