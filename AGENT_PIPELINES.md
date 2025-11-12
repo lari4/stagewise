@@ -294,3 +294,231 @@ See "Error Handling Pipeline" for full details.
 - Ready for tool execution phase
 
 ---
+## 3. Tool Execution Pipeline
+
+**Purpose:** Execute file operation tools requested by the LLM, handling both client-side and browser-side tools with proper parallelization.
+
+**Entry Point:** `onFinish` callback → `processParallelToolCalls()`
+
+**Location:** `agent/client/src/utils/process-parallel-tool-calls.ts`
+
+### ASCII Flow Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│            LLM Requests Tool Calls (onFinish)                    │
+│  Input: TypedToolCall[]                                          │
+│    [                                                             │
+│      { name: 'readFileTool', input: {...}, id: '123' },          │
+│      { name: 'grepSearchTool', input: {...}, id: '456' },        │
+│      ...                                                         │
+│    ]                                                             │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│         Phase 1: Categorize by Runtime                           │
+│  Filter by tool.runtime property:                                │
+│    - clientToolCalls: runtime='client' (file operations)         │
+│    - browserToolCalls: runtime='browser' (DOM operations)        │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│         Phase 2: Execute Client Tools in Parallel                │
+│  Promise.all(clientToolCalls.map(processToolCall))               │
+│                                                                  │
+│  For each tool:                                                  │
+│    1. Create ToolCallContext                                     │
+│    2. Validate tool has execute method                           │
+│    3. Execute: tool.execute(input, context)                      │
+│    4. Measure duration                                           │
+│    5. Handle result/error                                        │
+│    6. Call onToolCallComplete callback                           │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│         Phase 3: Execute Browser Tools Sequentially              │
+│  for (browserToolCall of browserToolCalls) {                     │
+│    await processBrowserToolCall(...)                             │
+│  }                                                               │
+│                                                                  │
+│  Note: Currently returns "Not yet implemented"                   │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│         Phase 4: Collect Results                                 │
+│  allResults = [...clientResults, ...browserResults]              │
+│  Filter out null values                                          │
+│  Return ToolCallProcessingResult[]                               │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│         Attach Results to Messages                               │
+│  Function: attachToolOutputToMessage()                           │
+│                                                                  │
+│  For each result:                                                │
+│    1. Find message by messageId                                  │
+│    2. Find tool part by toolCallId                               │
+│    3. Update tool part state:                                    │
+│       - SUCCESS: state='output-available', attach output         │
+│       - ERROR: state='output-error', attach error message        │
+│    4. Update Karton chat state                                   │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│         Return Results to Main Pipeline                          │
+│  - Tool results attached to history                              │
+│  - Ready for recursive callAgent() call                          │
+│  - LLM will process tool results in next iteration               │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Tool Workflows by Type
+
+#### Read File Tool Workflow
+
+```
+User/LLM Request
+     │
+     ▼
+┌─────────────────────┐
+│ readFileTool        │
+│ Params:             │
+│   target_file       │
+│   start_line        │
+│   end_line          │
+└─────┬───────────────┘
+      │
+      ▼
+┌─────────────────────────────────┐
+│ 1. Validate params              │
+│ 2. Resolve absolute path        │
+│ 3. Check file exists            │
+│ 4. Check file size (if entire)  │
+│ 5. Read file content            │
+│ 6. Return result with line info │
+└─────┬───────────────────────────┘
+      │
+      ▼
+Result: { content, totalLines }
+→ Back to LLM in next iteration
+```
+
+#### Grep Search Tool Workflow
+
+```
+User/LLM Request
+     │
+     ▼
+┌─────────────────────┐
+│ grepSearchTool      │
+│ Params:             │
+│   query (regex)     │
+│   file_pattern      │
+│   case_sensitive    │
+└─────┬───────────────┘
+      │
+      ▼
+┌──────────────────────────────────┐
+│ 1. Validate params               │
+│ 2. Build exclude patterns        │
+│ 3. Execute ripgrep               │
+│ 4. Collect matches (max 100)     │
+│ 5. Check if truncated            │
+│ 6. Format results                │
+└─────┬────────────────────────────┘
+      │
+      ▼
+Result: { matches[], totalMatches, filesSearched, truncated }
+→ LLM analyzes matches
+```
+
+#### Multi-Edit Tool Workflow
+
+```
+User/LLM Request
+     │
+     ▼
+┌──────────────────────┐
+│ multiEditTool        │
+│ Params:              │
+│   file_path          │
+│   edits[]            │
+│     old_string       │
+│     new_string       │
+│     replace_all      │
+└─────┬────────────────┘
+      │
+      ▼
+┌───────────────────────────────────┐
+│ 1. Validate file exists           │
+│ 2. Read current content           │
+│ 3. Apply edits sequentially       │
+│ 4. Write modified content         │
+│ 5. Create undo callback           │
+│ 6. Generate diff                  │
+└─────┬─────────────────────────────┘
+      │
+      ▼
+Result: { editsApplied, diff }
++ undoExecute callback stored
+→ LLM continues with next step
+```
+
+### Tool Call Context Structure
+
+```typescript
+{
+  tool: Tool,              // Tool definition with execute method
+  toolName: string,        // e.g., "readFileTool"
+  toolCallId: string,      // Unique ID for this invocation
+  input: any,              // Tool parameters
+  history: History,        // Full message history
+  onToolCallComplete?: (result) => void  // Callback for progress updates
+}
+```
+
+### Tool Result Structure
+
+```typescript
+{
+  success: boolean,
+  toolCallId: string,
+  duration: number,       // Execution time in ms
+  error?: {
+    type: 'error' | 'user_interaction_required',
+    message: string
+  },
+  result?: ToolResult     // From tool.execute()
+}
+```
+
+### Available Tools (7 total)
+
+1. **readFileTool:** Read file contents with line-by-line control
+2. **overwriteFileTool:** Overwrite entire file or create new
+3. **listFilesTool:** List files/directories with filtering
+4. **grepSearchTool:** Fast regex searches using ripgrep
+5. **globTool:** Find files matching glob patterns
+6. **multiEditTool:** Multiple find-replace edits in one file
+7. **deleteFileTool:** Delete file with undo capability
+
+Each tool execution:
+- Returns a `ToolResult` object
+- May include `diff` for file changes
+- May include `undoExecute` callback
+- Includes success/error status
+
+### Tool Part States
+
+- `input-available`: Tool call awaiting execution
+- `input-streaming`: Tool call being prepared
+- `output-available`: Tool executed successfully
+- `output-error`: Tool execution failed
+
+---
