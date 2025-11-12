@@ -742,3 +742,571 @@ All Messages Combined
 ```
 
 ---
+## 5. Chat Management Pipeline
+
+**Purpose:** Manage chat lifecycle including creation, switching, deletion, and title generation.
+
+**Entry Points:** Various RPC procedures in Agent.ts
+
+**Location:** `agent/client/src/Agent.ts`
+
+### Chat Lifecycle Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                 User Opens Application                           │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│         Agent.initialize() - Create Initial Chat                 │
+│  - Generate UUID for chat                                        │
+│  - Set as active chat                                            │
+│  - Initialize empty message history                              │
+│  - Title: "New Chat"                                             │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│         User Sends First Message                                 │
+│  Triggers: sendUserMessage procedure                             │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│         Generate Chat Title (Background)                         │
+│  Function: generateChatTitle()                                   │
+│  Model: gemini-2.5-flash (lightweight)                           │
+│  Prompt: generateChatTitleSystemPrompt                           │
+│                                                                  │
+│  Process:                                                        │
+│    1. Convert history to model messages                          │
+│    2. Call Gemini with title generation prompt                   │
+│    3. Validate title (1-50 chars, max 7 words)                   │
+│    4. Update chat state with title                               │
+│                                                                  │
+│  Fallback: "New Chat - {timestamp}"                              │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│         Continue Conversation                                    │
+│  - Messages accumulate in chat history                           │
+│  - Title remains unchanged                                       │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+              ┌──────────┴──────────┐
+              │  User Action?       │
+              └──────────┬──────────┘
+                         │
+      ┌──────────────────┼──────────────────┐
+      │                  │                  │
+  CREATE NEW         SWITCH            DELETE
+      │                  │                  │
+      ▼                  ▼                  ▼
+```
+
+### Create New Chat Workflow
+
+```
+┌─────────────────────────────────────────┐
+│  createChat Procedure                   │
+└─────────────┬───────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────┐
+│  1. Generate new UUID                   │
+│  2. Create empty chat object            │
+│  3. Add to chats collection             │
+│  4. Set as active chat                  │
+│  5. Initialize empty messages array     │
+│  6. Set title: "New Chat"               │
+└─────────────┬───────────────────────────┘
+              │
+              ▼
+   New chat ready for messages
+```
+
+### Switch Chat Workflow
+
+```
+┌─────────────────────────────────────────┐
+│  switchChat Procedure                   │
+│  Input: chatId                          │
+└─────────────┬───────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────┐
+│  1. Validate chatId exists              │
+│  2. Abort any ongoing agent call        │
+│  3. Update active chat ID               │
+│  4. Load chat messages from state       │
+│  5. Update UI to show chat              │
+└─────────────┬───────────────────────────┘
+              │
+              ▼
+   Switched to selected chat
+```
+
+### Delete Chat Workflow
+
+```
+┌─────────────────────────────────────────┐
+│  deleteChat Procedure                   │
+│  Input: chatId                          │
+└─────────────┬───────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────┐
+│  1. Validate chatId exists              │
+│  2. Cannot delete active chat           │
+│  3. Remove from chats collection        │
+│  4. Clear undo stack for chat           │
+│  5. Update UI                           │
+└─────────────┬───────────────────────────┘
+              │
+              ▼
+   Chat deleted successfully
+```
+
+### Chat Title Generation Prompt
+
+**Location:** `agent/client/src/utils/generate-chat-title.ts`
+
+**Prompt:**
+
+```xml
+<system_prompt>
+  <task>
+    You are a helpful assistant that creates short, concise titles 
+    for newly created chats between a user and a frontend coding agent.
+  </task>
+  <instructions>
+    <instruction>Analyze the first message of the user to understand core intent.</instruction>
+    <instruction>Generate a chat title that summarizes this intent.</instruction>
+  </instructions>
+  <rules>
+    <rule name="length">The title must be a maximum of 7 words.</rule>
+    <rule name="format">Your response must consist ONLY of the generated title. 
+    Do not add any other text, explanation, or quotation marks.</rule>
+  </rules>
+  <example>
+    <user_message>
+      Add a new text input field for a user's middle name in the 
+      main registration form, right after the first name field.
+    </user_message>
+    <valid_output>
+      Add Middle Name Field
+    </valid_output>
+  </example>
+</system_prompt>
+```
+
+**Data Sent to Model:**
+- System prompt (above)
+- First user message from chat history
+- Any context from that first message
+
+**Output Processing:**
+- Trim whitespace
+- Remove surrounding quotes if present
+- Validate length (1-50 characters)
+- If validation fails: Use fallback title
+
+---
+
+## 6. Error Handling Pipeline
+
+**Purpose:** Handle various error conditions with appropriate recovery strategies.
+
+**Location:** `agent/client/src/Agent.ts` (callAgent function)
+
+### Error Handling Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              LLM Stream Error Occurs                             │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+              ┌──────────┴──────────┐
+              │   Error Type?       │
+              └──────────┬──────────┘
+                         │
+      ┌──────────────────┼──────────────────┬──────────────────┐
+      │                  │                  │                  │
+   ABORT          PLAN LIMITS        AUTH ERROR      INSUFFICIENT
+   ERROR            EXCEEDED                           CREDITS
+      │                  │                  │                  │
+      ▼                  ▼                  ▼                  ▼
+```
+
+### 1. Abort Error Handling
+
+```
+┌─────────────────────────────────────────┐
+│  User Clicks "Stop" Button              │
+└─────────────┬───────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────┐
+│  abortAgentCall Procedure               │
+│  - Set abortController.abort()          │
+│  - Stream throws AbortError             │
+└─────────────┬───────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────┐
+│  Error Handler (catch block)            │
+│  1. Detect isAbortError                 │
+│  2. Reset authRetryCount = 0            │
+│  3. Clean up pending operations         │
+│  4. Set agent to idle                   │
+│  5. No error shown to user              │
+└─────────────────────────────────────────┘
+```
+
+### 2. Plan Limits Exceeded
+
+```
+┌─────────────────────────────────────────┐
+│  LLM Returns "Plan limits exceeded"     │
+│  Message: "You need to wait X minutes"  │
+└─────────────┬───────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────┐
+│  Error Handler                          │
+│  1. Extract cooldown minutes from msg   │
+│  2. Emit 'planLimitsExceeded' event     │
+│     - Event data: { minutesUntilReset } │
+│  3. Set error in chat state             │
+│  4. Clean up and return                 │
+└─────────────┬───────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────┐
+│  UI Response                            │
+│  - Show cooldown timer                  │
+│  - Disable send button until cooldown   │
+│  - User sees clear error message        │
+└─────────────────────────────────────────┘
+```
+
+### 3. Authentication Error (with Retry)
+
+```
+┌─────────────────────────────────────────┐
+│  LLM Returns Auth Error                 │
+│  (Invalid/expired token)                │
+└─────────────┬───────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────┐
+│  Check Retry Count                      │
+│  - authRetryCount < 2?                  │
+└─────────────┬───────────────────────────┘
+              │
+        ┌─────┴─────┐
+       YES          NO
+        │            │
+        ▼            ▼
+┌─────────────┐  ┌──────────────┐
+│ RETRY       │  │ FAIL         │
+│ with        │  │ Set auth     │
+│ refresh     │  │ error        │
+└─────┬───────┘  └──────────────┘
+      │
+      ▼
+┌─────────────────────────────────────────┐
+│  Retry Logic                            │
+│  1. Increment authRetryCount            │
+│  2. Call refreshAccessToken()           │
+│  3. Reinitialize client with new token  │
+│  4. Recursively call callAgent()        │
+│     - Same chatId, history, snippets    │
+└─────────────┬───────────────────────────┘
+              │
+              ▼
+    Success or fail on retry attempt
+```
+
+### 4. Insufficient Credits
+
+```
+┌─────────────────────────────────────────┐
+│  LLM Returns "Insufficient credits"     │
+└─────────────┬───────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────┐
+│  Error Handler                          │
+│  1. Emit 'creditsInsufficient' event    │
+│  2. Set error in chat state             │
+│  3. Clean up and return                 │
+└─────────────┬───────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────┐
+│  UI Response                            │
+│  - Show "Add credits" prompt            │
+│  - Provide link to console.stagewise.io │
+│  - Disable further agent calls          │
+└─────────────────────────────────────────┘
+```
+
+### 5. General Error Handling
+
+```
+┌─────────────────────────────────────────┐
+│  Unknown/Other Error                    │
+└─────────────┬───────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────┐
+│  Error Handler                          │
+│  1. Format error description            │
+│     - Extract error.message             │
+│     - Fallback to "Unknown error"       │
+│  2. Set error in chat state             │
+│  3. Clean up pending operations         │
+│  4. Reset recursion depth               │
+│  5. Set agent to idle                   │
+└─────────────┬───────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────┐
+│  UI Response                            │
+│  - Display error message to user        │
+│  - Allow user to retry or start new     │
+└─────────────────────────────────────────┘
+```
+
+### Error Recovery Strategies
+
+1. **Abort Error:** Silent cleanup, no user notification
+2. **Plan Limits:** Show cooldown timer, auto-retry after cooldown
+3. **Auth Error:** Automatic token refresh and retry (up to 2 attempts)
+4. **Credits:** Prompt user to add credits, provide payment link
+5. **General:** Display error, allow manual retry
+
+---
+
+## 7. Undo System Pipeline
+
+**Purpose:** Allow users to undo file changes made by the agent, with per-chat undo stacks.
+
+**Entry Point:** `undoToolCallsUntilLatestUserMessage` or `undoToolCallsUntilUserMessage` procedures
+
+**Location:** `agent/client/src/Agent.ts`
+
+### Undo System Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Undo Stack (Per Chat)                               │
+│  chatUndoStacks: Map<chatId, UndoCallback[]>                     │
+│                                                                  │
+│  Each callback can restore one file operation                    │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              When Tool Executes                                  │
+│  If tool.execute() returns undoExecute callback:                 │
+│    - Add callback to chat's undo stack                           │
+│    - Callback captures original state                            │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              User Requests Undo                                  │
+│  Click "Undo" button in UI                                       │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+```
+
+### Undo Workflow
+
+```
+┌─────────────────────────────────────────┐
+│  undoToolCallsUntilLatestUserMessage    │
+│  or                                     │
+│  undoToolCallsUntilUserMessage          │
+└─────────────┬───────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────┐
+│  1. Find target user message in history │
+│  2. Collect all tool calls after target │
+│  3. Get undo callbacks from stack       │
+└─────────────┬───────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────┐
+│  Execute Undo Callbacks in Reverse      │
+│  for (callback of callbacks.reverse())  │
+│    await callback()                     │
+│                                         │
+│  Each callback restores original state: │
+│    - Overwrite: Restore old content     │
+│    - Delete: Recreate deleted file      │
+│    - Multi-edit: Restore original       │
+└─────────────┬───────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────┐
+│  Update Chat State                      │
+│  1. Remove messages after target        │
+│  2. Clear corresponding undo callbacks   │
+│  3. Update UI to reflect changes        │
+└─────────────┬───────────────────────────┘
+              │
+              ▼
+   Files restored to previous state
+```
+
+### Undo Callback Examples
+
+#### Overwrite File Tool
+
+```typescript
+// When file is created/modified:
+undoExecute = async () => {
+  if (fileExistedBefore) {
+    // Restore original content
+    await writeFile(path, originalContent);
+  } else {
+    // File was newly created, delete it
+    await deleteFile(path);
+  }
+}
+```
+
+#### Delete File Tool
+
+```typescript
+// When file is deleted:
+undoExecute = async () => {
+  // Recreate the deleted file
+  await ensureDir(parentDir);
+  await writeFile(path, originalContent);
+}
+```
+
+#### Multi-Edit Tool
+
+```typescript
+// When file is edited:
+undoExecute = async () => {
+  // Restore to pre-edit state
+  await writeFile(path, originalContent);
+}
+```
+
+### Undo Stack Management
+
+```
+Chat 1 Undo Stack: [undo1, undo2, undo3, ...]
+                     │      │      │
+                     └──────┴──────┴─> Executed in reverse order
+
+Chat 2 Undo Stack: [undoA, undoB, ...]
+                     │      │
+                     └──────┴─> Independent from Chat 1
+```
+
+**Key Features:**
+- Each chat has its own undo stack
+- Undo executes callbacks in reverse order (LIFO)
+- Callbacks capture file state before modification
+- Undo removes messages and tool results from history
+- Can undo to specific user message (not just latest)
+
+---
+
+## Summary
+
+### Complete Pipeline Flow
+
+```
+USER MESSAGE
+     │
+     ▼
+[Chat Management] ──> Create/Switch/Load Chat
+     │
+     ▼
+[Main Agent Flow] ──> Gather Context → Generate Title
+     │
+     ▼
+[Message Conversion] ──> UI → Model Format + Enrichment
+     │
+     ▼
+[Message Streaming] ──> Claude API → Parse Stream → Update UI
+     │
+     ▼
+[Tool Execution] ──> Categorize → Execute → Attach Results
+     │
+     ▼
+[Error Handling] ──> Detect → Retry/Recover/Report
+     │
+     ▼
+[Undo System] ──> Track Callbacks → Execute on Undo
+     │
+     ▼
+RECURSIVE CALL (if tools) OR COMPLETE
+```
+
+### Key Prompts Used Across Pipelines
+
+1. **Main System Prompt** (`system.ts`)
+   - Used in: Main Agent Execution Flow
+   - When: Every agent call
+   - Purpose: Define agent behavior and capabilities
+
+2. **Chat Title Generation** (`generate-chat-title.ts`)
+   - Used in: Chat Management Pipeline
+   - When: First user message only
+   - Purpose: Auto-generate descriptive chat title
+   - Model: gemini-2.5-flash (lightweight)
+
+3. **User Message Enrichment** (`user.ts`, `browser-metadata.ts`, `html-elements.ts`)
+   - Used in: Message Conversion Pipeline
+   - When: Every user message
+   - Purpose: Add browser and DOM context
+
+4. **Project Context Snippets** (`get-project-info.ts`, `get-project-path.ts`)
+   - Used in: Main Agent Execution Flow
+   - When: Every agent call
+   - Purpose: Provide project structure information
+
+### Data Flow Summary
+
+```
+User Input
+  ↓
+Chat State (Karton)
+  ↓
+Prompt Snippets (Project Info)
+  ↓
+Message Conversion (UI → Model)
+  ↓
+Prompt Assembly (System + User + Context)
+  ↓
+Claude API (Streaming)
+  ↓
+Tool Execution (File Operations)
+  ↓
+Tool Results → History
+  ↓
+Recursive Call or Complete
+  ↓
+Undo Stack Updated
+```
+
+---
+
+*This documentation was generated on 2025-11-12*
+*For questions or updates, please refer to the source code locations provided.*
