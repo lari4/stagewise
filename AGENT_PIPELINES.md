@@ -196,3 +196,101 @@ The pipeline includes comprehensive error handling:
 See "Error Handling Pipeline" for full details.
 
 ---
+## 2. Message Streaming Pipeline
+
+**Purpose:** Stream LLM responses in real-time and update the UI progressively.
+
+**Entry Point:** `callAgent()` → `streamText()` → `parseUiStream()`
+
+**Location:** `agent/client/src/Agent.ts`
+
+### ASCII Flow Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│           streamText() - Claude Sonnet 4 API Call                │
+│  Input:                                                          │
+│    - model: claude-sonnet-4-20250514                             │
+│    - messages: [SystemMessage, ...History, CurrentUser]          │
+│    - temperature: 0.7                                            │
+│    - maxTokens: 10000                                            │
+│    - tools: cliToolsWithoutExecute                               │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              Start Streaming Response                            │
+│  - AsyncIterableStream created                                   │
+│  - Begins yielding message chunks                                │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│           parseUiStream() - For-Await Loop                       │
+│  Process each streamed message chunk:                            │
+│    1. Check if message already exists (by ID)                    │
+│    2. Add metadata: createdAt timestamp                          │
+│    3. Determine action: UPDATE or ADD                            │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+                  ┌──────┴──────┐
+                  │ Exists?     │
+                  └──────┬──────┘
+                         │
+           ┌─────────────┴─────────────┐
+           │                           │
+          YES                          NO
+           │                           │
+           ▼                           ▼
+┌──────────────────────┐   ┌──────────────────────┐
+│  UPDATE Message      │   │  ADD New Message     │
+│  - Find by ID        │   │  - Call onNewMessage │
+│  - Replace in place  │   │  - Track lastMsgId   │
+│  - Update chat state │   │  - Add to chat       │
+└──────────┬───────────┘   └──────────┬───────────┘
+           │                           │
+           └───────────┬───────────────┘
+                       │
+                       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                UI State Updated (Karton)                         │
+│  - User sees streaming response in real-time                     │
+│  - Tool calls appear as they're generated                        │
+│  - Reasoning (thinking) blocks shown progressively               │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              Stream Complete (onFinish)                          │
+│  - Final message with complete response                          │
+│  - Tool calls ready for execution                                │
+│  - Pass to Tool Execution Pipeline                               │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Message Types Streamed
+
+1. **Text Content:** Assistant's response text
+2. **Reasoning Blocks:** Extended thinking (10,000 token budget)
+3. **Tool Calls:** File operation requests
+4. **Step Starts:** Intermediate thinking steps
+
+### Data Flow
+
+**Input:**
+- System prompt (with dynamic context)
+- Message history (cleaned, sanitized)
+- Current user message (with browser/DOM context)
+
+**Processing:**
+- Streamed in chunks from Claude API
+- Each chunk is a partial or complete message
+- Messages are incrementally built and updated
+
+**Output:**
+- Updated chat state with streaming messages
+- Final complete messages with tool calls
+- Ready for tool execution phase
+
+---
